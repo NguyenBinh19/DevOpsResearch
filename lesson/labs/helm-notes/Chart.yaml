@@ -1,0 +1,6 @@
+apiVersion: v2
+name: notes-api
+description: Local teaching chart for the Notes API
+type: application
+version: 0.1.0
+appVersion: "lab-1"

@@ -1,0 +1,29 @@
+## Một ứng dụng Azure theo ba lớp: identity, network, runtime
+
+Ứng dụng chạy trên App Service/Functions/AKS hay VM đều cần danh tính để đọc Key Vault, Storage, Service Bus, Azure SQL. **Managed identity** giảm việc lưu secret dài hạn; nhưng vẫn cần cấp role/quyền đúng resource và kiểm tra app thực sự dùng identity nào. **Entra ID** quản lý danh tính/ứng dụng; **Azure RBAC** kiểm soát nhiều hành động trên tài nguyên Azure theo scope; **data-plane permission** của từng dịch vụ có thể cần cấu hình riêng. Network VNet, NSG, firewall và Private Endpoint quyết định đường đi, không thay authorization. Một app có quyền đọc SQL nhưng DNS trỏ public IP vẫn có thể timeout; app tới private IP nhưng thiếu DB permission vẫn bị từ chối.
+
+Chọn compute theo bài toán: App Service phù hợp web app với ít gánh quản trị host; Functions phù hợp event-driven/trigger và có đặc tính cold start/timeout/scaling theo plan; AKS cho orchestration và khả năng tùy biến nhưng tăng trách nhiệm cluster; VM cho kiểm soát OS và gánh patch/hardening lớn hơn. Không chọn AKS chỉ vì JD có Kubernetes nếu hệ thống nhỏ đủ dùng App Service. Với Service Bus, cần hiểu queue/topic, delivery, retry, dead-letter, identity và giới hạn downstream. Storage có blob/file/queue/table tùy dịch vụ; chọn theo API và consistency/cost chứ không gọi chung “Storage”.
+
+## Private Endpoint: một đường DNS cụ thể
+
+Giả sử Notes API trên App Service cần Azure SQL Database qua private endpoint. App vẫn dùng hostname SQL chuẩn trong connection string để TLS/name validation hoạt động. Từ **runtime của App Service**, DNS phải trả private IP phù hợp, VNet integration/route phải dẫn tới subnet endpoint, NSG/firewall/SQL connection policy phải cho traffic và SQL auth phải chấp nhận identity. Tạo Private Endpoint resource trong portal chỉ hoàn thành một mắt xích. Nếu laptop `nslookup` trả public IP nhưng app trong VNet trả private IP, điều đó có thể là thiết kế split DNS dự kiến. Tránh hardcode private IP vào connection string.
+
+**Đường điều tra:** DNS từ app -> TCP tới host/port -> TLS/certificate -> auth Entra/SQL -> query/schema. Nếu DNS sai, đừng cấp thêm Owner role. Nếu `Login failed`, đừng mở firewall rộng. Nếu query chậm sau khi kết nối, nhìn pool/DB metrics và query plan. Azure SQL Database và SQL Managed Instance có chi tiết endpoint/DNS khác; đọc đúng tài liệu dịch vụ. Nguồn: [Azure SQL Database private endpoint](https://learn.microsoft.com/en-us/azure/azure-sql/database/private-endpoint-overview), [Azure Private Endpoint](https://learn.microsoft.com/en-us/azure/private-link/private-endpoint-overview).
+
+## Lab thiết kế không phát sinh chi phí
+
+Vẽ staging Notes API dùng App Service, Azure SQL, Key Vault, Storage và Service Bus. Lập bảng cho mỗi kết nối: nguồn, đích, DNS, IP public/private, port/protocol, managed identity/role, secret/certificate, telemetry và một failure mode. **Bước 1:** viết hai request: người dùng gọi API và API gửi message. **Bước 2:** cho app quyền tối thiểu, CI quyền deploy staging nhưng không đọc DB production. **Bước 3:** mô phỏng DB private DNS sai: app thấy lỗi gì, KQL/App Insights ghi dấu hiệu nào, sửa ở DNS hay code? **Bước 4:** mô phỏng Service Bus consumer ngừng: backlog, age of oldest message, dead-letter tăng; alert nào hành động được? **Bước 5:** dùng calculator chính thức ước tính chi phí theo region/SKU hiện tại trước khi tạo tài nguyên thật.
+
+**Lời giải định hướng:** không có một “network OK” chung. DNS/route/TCP/auth là bốn phép kiểm khác nhau. Key Vault secret reference/managed identity cần permission đúng; nếu app start trước khi permission propagation, cần log rõ và retry có giới hạn. Service Bus có thể nhận message trong khi consumer chết, nên API trả 202 không chứng minh công việc đã hoàn tất. Ghi correlation ID từ HTTP tới message và consumer.
+
+## Azure DevOps Pipelines và IaC
+
+YAML pipeline định nghĩa trigger, stages/jobs/tasks, variables, environments và approvals theo cấu hình tổ chức. Bicep/ARM mô tả tài nguyên Azure; Terraform dùng state và provider. Dù dùng công cụ nào, plan/what-if cần review, identity pipeline cần scope hẹp và mỗi môi trường có gate. Nếu dùng service connection có quyền subscription Owner cho mọi PR, thay pipeline là đường tấn công. Tách CI build artifact khỏi CD/promotion, ghi digest và deployment revision; smoke test sau deploy và rollback có điều kiện với DB migration.
+
+App Insights/Log Analytics/KQL giúp đọc request/dependency/exception nếu instrumentation và ingestion được cấu hình. Một query KQL hữu ích cần filter thời gian, app/operation ID, status và join/correlation với dependency; không tải mọi log rồi tìm bằng mắt. Cân nhắc sampling, retention, PII và chi phí ingestion. Nếu alert không có owner/runbook hoặc page mỗi lúc CPU nhấp nhô, nó sẽ bị bỏ qua.
+
+## Nhánh AI tự động hóa trong JD: chỉ sau nền tảng
+
+Agent đọc ticket S360/SFI/IcM và đề xuất fix có thể tiết kiệm toil, nhưng agent cần quyền hẹp, bằng chứng nguồn, audit trail, dry-run, policy gate và human approval cho thay đổi rủi ro. Phân biệt **đề xuất** với **áp dụng** và **đóng ticket**. Một ticket “rotate secret” không đủ thông tin để agent tự xoay production key nếu không biết consumer nào, thời gian overlap, rollback và owner. Bắt đầu bằng phân loại/thu thập bằng chứng có người review, đo precision/false action, rồi mới mở rộng thao tác tự động. Đó là DevOps engineering, không phải chỉ gắn LLM API vào pipeline.
+
+**Câu hỏi có lời giải:** managed identity có xóa nhu cầu RBAC không? Không; nó là danh tính, vẫn cần quyền. **Private Endpoint có tự sửa DNS không?** Phụ thuộc cấu hình DNS/link của môi trường; phải kiểm tra từ runtime. **App Insights xanh có chứng minh business flow?** Không nếu chưa instrument đúng giao dịch. Nguồn: [Azure Well-Architected](https://learn.microsoft.com/en-us/azure/well-architected/), [Azure DevOps YAML schema](https://learn.microsoft.com/en-us/azure/devops/pipelines/yaml-schema/).
